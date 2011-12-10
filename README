@@ -1,5 +1,12 @@
-Import into a JS component using
-'Components.utils.import("resource://firefogg/subprocess.jsm");'
+Use subprocess.jsm in your Add-on:
+
+copy subprocess.jsm into modules/
+
+add this line to chrome.manifest:
+ resource   EXTENSION modules/
+
+and import it where needed:
+ Components.utils.import("resource://EXTENSION/subprocess.jsm");
 
 This object allows to start a process, and read/write data to/from it
 using stdin/stdout/stderr streams.
