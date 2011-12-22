@@ -101,3 +101,4 @@ executed:
 
  kill():      kill the subprocess. Any open pipes will be closed and
               done will be called.
+
