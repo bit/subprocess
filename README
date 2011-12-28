@@ -1,11 +1,12 @@
-Use subprocess.jsm in your Add-on:
+How to Use subprocess.jsm in your Add-on
+----------------------------------------
 
-copy subprocess.jsm into modules/
+1. copy subprocess.jsm and subprocess_worker_*.js into modules/
 
-add this line to chrome.manifest:
+2. add this line to chrome.manifest:
  resource   EXTENSION modules/
 
-and import it where needed:
+3. import it where needed:
  Components.utils.import("resource://EXTENSION/subprocess.jsm");
 
 This object allows to start a process, and read/write data to/from it
@@ -40,8 +41,8 @@ Usage example:
             // only do if you can wait that long
 
 
-Description of parameters:
---------------------------
+Description of Parameters
+-------------------------
 Apart from <command>, all arguments are optional.
 
  command:     either a |nsIFile| object pointing to an executable file or a
@@ -60,34 +61,37 @@ Apart from <command>, all arguments are optional.
               To get binary data, set this to null and the returned string
               is not decoded in any way.
 
- workdir:     optional; String containing the platform-dependent path to a
-              directory to become the current working directory of the subprocess.
+ workdir:     Optional; either a |nsIFile| object or string containing the
+              platform-dependent path to a directory to become the current
+              working directory of the subprocess.
 
- stdin:       optional input data for the process to be passed on standard
+ stdin:       Optional input data for the process to be passed on standard
               input. stdin can either be a string or a function.
-              a string gets written to stdin and stdin gets closed,
-              a function gets passed an object with write and close function.
+              A |string| gets written to stdin and stdin gets closed;
+              A |function| gets passed an object with write and close function.
+              Please note that the write() function will return almost immediately;
+              data is always written asynchronously on a separate thread.
 
- stdout:      an optional function that can receive output data from the
+ stdout:      An optional function that can receive output data from the
               process. The stdout-function is called asynchronously; it can be
               called mutliple times during the execution of a process.
               At a minimum at each occurance of \n or \r.
               Please note that null-characters might need to be escaped
               with something like 'data.replace(/\0/g, "\\0");'.
 
- stderr:      an optional function that can receive stderr data from the
+ stderr:      An optional function that can receive stderr data from the
               process. The stderr-function is called asynchronously; it can be
               called mutliple times during the execution of a process. Please
               note that null-characters might need to be escaped with
               something like 'data.replace(/\0/g, "\\0");'.
               (on windows it only gets called once right now)
 
- done:        optional function that is called when the process has terminated.
+ done:        Optional function that is called when the process has terminated.
               The exit code from the process available via result.exitCode. If
               stdout is not defined, then the output from stdout is available
               via result.stdout. stderr data is in result.stderr
- 
- mergeStderr: optional boolean value. If true, stderr is merged with stdout;
+
+ mergeStderr: Optional boolean value. If true, stderr is merged with stdout;
               no data will be provided to stderr.
 
 
@@ -102,3 +106,15 @@ executed:
  kill():      kill the subprocess. Any open pipes will be closed and
               done will be called.
 
+
+Other methods in subprocess
+---------------------------
+The following functions help debugging and provide logging facilities.
+
+ registerDebugHandler(functionRef):   register a handler that is called to get
+                                      debugging information
+ registerLogHandler(functionRef):     register a handler that is called to get error
+                                      messages
+
+ example:
+    subprocess.registerLogHandler( function(s) { dump(s); } );
