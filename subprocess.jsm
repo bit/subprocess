@@ -35,6 +35,7 @@
  * the provisions above, a recipient may use your version of this file under
  * the terms of any one of the MPL, the GPL or the LGPL.
  * ***** END LICENSE BLOCK ***** */
+
 /*
  * Import into a JS component using
  * 'Components.utils.import("resource://firefogg/subprocess.jsm");'
@@ -155,6 +156,9 @@ let EXPORTED_SYMBOLS = [ "subprocess" ];
 
 const Cc = Components.classes;
 const Ci = Components.interfaces;
+
+const NS_LOCAL_FILE = "@mozilla.org/file/local;1";
+
 
 //Windows API definitions
 if (ctypes.size_t.size == 8) {
@@ -339,6 +343,42 @@ function convertBytes(bytes, charset) {
     return string;
 }
 
+function getCommandStr(command) {
+    let commandStr = null;
+    if (typeof(command) == "string") {
+        let file = Cc[NS_LOCAL_FILE].createInstance(Ci.nsILocalFile);
+        file.initWithPath(command);
+        if (! (file.isExecutable() && file.isFile()))
+            throw("File '"+command+"' is not an executable file");
+        commandStr = command;
+    }
+    else {
+        if (! (command.isExecutable() && command.isFile()))
+            throw("File '"+command.path+"' is not an executable file");
+        commandStr = command.path;
+    }
+
+    return commandStr;
+}
+
+function getWorkDir(workdir) {
+    let workdirStr = null;
+    if (typeof(workdir) == "string") {
+        let file = Cc[NS_LOCAL_FILE].createInstance(Ci.nsILocalFile);
+        file.initWithPath(workdir);
+        if (! (file.isDirectory()))
+            throw("Directory '"+workdir+"' does not exist");
+        workdirStr = workdir;
+    }
+    else if (workdir) {
+        if (! workdir.isDirectory())
+            throw("Directory '"+workdir.path+"' does not exist");
+        workdirStr = workdir.path;
+    }
+    return workdirStr;
+}
+
+
 var subprocess = {
     call: function(options) {
         options.mergeStderr = options.mergeStderr || false;
@@ -383,7 +423,7 @@ function subprocess_win32(options) {
         stdoutWorker = null,
         stderrWorker = null,
         pendingWriteCount = 0,
-        readers = 0,
+        readers = options.mergeStderr ? 1 : 2,
         stdinOpenState = 2,
         error = '',
         output = '';
@@ -592,7 +632,7 @@ function subprocess_win32(options) {
     );
 
     //functions
-    function popen(command, args, environment, child) {
+    function popen(command, workdir, args, environment, child) {
         //escape arguments
         args.unshift(command);
         for (var i = 0; i < args.length; i++) {
@@ -706,7 +746,7 @@ function subprocess_win32(options) {
                            true,            // inherits system handles
                            CREATE_UNICODE_ENVIRONMENT|CREATE_NO_WINDOW, // process flags
                            environment,     // envrionment block
-                           options.workdir, // set as current directory
+                           workdir,          // set as current directory
                            si.address(),    // (in) startup information
                            pi.address()     // (out) process information
         ))
@@ -823,7 +863,6 @@ function subprocess_win32(options) {
      * the caller.
      */
     function createReader(pipe, name, callbackFunc) {
-        ++readers;
         var worker = new ChromeWorker("subprocess_worker_win.js");
         worker.onmessage = function(event) {
             switch(event.data.msg) {
@@ -919,11 +958,18 @@ function subprocess_win32(options) {
 
             setTimeout(function _done() {
                 if (options.done) {
-                    options.done({
-                        exitCode: exitCode,
-                        stdout: output,
-                        stderr: error,
-                    });
+                    try {
+                        options.done({
+                            exitCode: exitCode,
+                            stdout: output,
+                            stderr: error,
+                        });
+                    }
+                    catch (ex) {
+                        // prevent from blocking if options.done() throws an error
+                        done = true;
+                        throw ex;
+                    }
                 }
                 done = true;
             }, 0);
@@ -931,21 +977,33 @@ function subprocess_win32(options) {
         }
     }
 
+    var cmdStr = getCommandStr(options.command);
+    var workDir = getWorkDir(options.workdir);
+
     //main
-    hChildProcess = popen(options.command, options.arguments, options.environment, child);
+    hChildProcess = popen(cmdStr, workDir, options.arguments, options.environment, child);
+
+    readPipes();
 
     if (options.stdin) {
        createStdinWriter();
 
         if(typeof(options.stdin) == 'function') {
-            options.stdin({
-                write: function(data) {
-                    writeStdin(data);
-                },
-                close: function() {
-                    closeStdinHandle();
-                }
-            });
+            try {
+                options.stdin({
+                    write: function(data) {
+                        writeStdin(data);
+                    },
+                    close: function() {
+                        closeStdinHandle();
+                    }
+                });
+            }
+            catch (ex) {
+                // prevent from failing if options.stdin() throws an exception
+                closeStdinHandle();
+                throw ex;
+            }
         } else {
             writeStdin(options.stdin);
             closeStdinHandle();
@@ -953,8 +1011,6 @@ function subprocess_win32(options) {
     }
     else
         closeStdinHandle();
-
-    readPipes();
 
     return {
         kill: function() {
@@ -972,6 +1028,7 @@ function subprocess_win32(options) {
     }
 }
 
+
 function subprocess_unix(options) {
     // stdin pipe states
     const OPEN = 2;
@@ -988,7 +1045,7 @@ function subprocess_unix(options) {
         stdoutWorker = null,
         stderrWorker = null,
         pendingWriteCount = 0,
-        readers = 0,
+        readers = options.mergeStderr ? 1 : 2,
         stdinOpenState = OPEN,
         error = '',
         output = '',
@@ -1098,7 +1155,7 @@ function subprocess_unix(options) {
                           ctypes.int
     );
 
-    function popen(command, args, environment, child) {
+    function popen(command, workdir, args, environment, child) {
         var _in,
             _out,
             _err,
@@ -1155,8 +1212,8 @@ function subprocess_unix(options) {
             child.pid = pid;
             return pid;
         } else if (pid == 0) { // child
-            if (options.workdir) {
-                if (chdir(options.workdir) < 0) {
+            if (workdir) {
+                if (chdir(workdir) < 0) {
                     exit(126);
                 }
             }
@@ -1284,7 +1341,6 @@ function subprocess_unix(options) {
      *
      */
     function createReader(pipe, name, callbackFunc) {
-        ++readers;
         var worker = new ChromeWorker("subprocess_worker_unix.js");
         worker.onmessage = function(event) {
             switch(event.data.msg) {
@@ -1366,11 +1422,19 @@ function subprocess_unix(options) {
 
             setTimeout(function _done() {
                 if (options.done) {
-                    options.done({
-                        exitCode: exitCode,
-                        stdout: output,
-                        stderr: error,
-                    });
+                    try {
+                        options.done({
+                            exitCode: exitCode,
+                            stdout: output,
+                            stderr: error,
+                        });
+                    }
+                    catch(ex) {
+                        // prevent from blocking if options.done() throws an error
+                        done = true;
+                        throw ex;
+                    }
+
                 }
                 done = true;
             }, 0);
@@ -1380,28 +1444,40 @@ function subprocess_unix(options) {
     }
 
     //main
+
+    var cmdStr = getCommandStr(options.command);
+    var workDir = getWorkDir(options.workdir);
+
     child = {};
-    pid = popen(options.command, options.arguments, options.environment, child);
+    pid = popen(cmdStr, workDir, options.arguments, options.environment, child);
 
     debugLog("subprocess started; got PID "+pid+"\n");
+
+    readPipes();
+
     if (options.stdin) {
-       createStdinWriter();
+        createStdinWriter();
         if(typeof(options.stdin) == 'function') {
-            options.stdin({
-                write: function(data) {
-                    writeStdin(data);
-                },
-                close: function() {
-                    closeStdinHandle();
-                }
-            });
+            try {
+                options.stdin({
+                    write: function(data) {
+                        writeStdin(data);
+                    },
+                    close: function() {
+                        closeStdinHandle();
+                    }
+                });
+            }
+            catch(ex) {
+                // prevent from failing if options.stdin() throws an exception
+                closeStdinHandle();
+                throw ex;
+            }
         } else {
             writeStdin(options.stdin);
             closeStdinHandle();
         }
     }
-
-    readPipes();
 
     return {
         wait: function() {
@@ -1417,4 +1493,3 @@ function subprocess_unix(options) {
         }
     }
 }
-
