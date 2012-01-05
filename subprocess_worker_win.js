@@ -45,7 +45,7 @@
 
 'use strict';
 
-const ReadFileBufferSize = 1024;
+const BufferSize = 1024;
 
 const BOOL = ctypes.bool;
 const HANDLE = ctypes.size_t;
@@ -70,7 +70,8 @@ typedef struct _OVERLAPPED {
 */
 const OVERLAPPED = new ctypes.StructType("OVERLAPPED");
 
-var ReadFileBuffer = ctypes.char.array(ReadFileBufferSize);
+var ReadFileBuffer = ctypes.char.array(BufferSize);
+var WriteFileBuffer = ctypes.uint8_t.array(BufferSize);
 
 var kernel32dll = null;
 var libFunc = {};
@@ -92,12 +93,15 @@ function initLib(libName) {
       __out_opt    LPDWORD lpNumberOfBytesWritten,
       __inout_opt  LPOVERLAPPED lpOverlapped
     );
+
+    NOTE: lpBuffer is declared as array of unsigned int8 instead of char to avoid
+           implicit charset conversion
     */
     libFunc.WriteFile = kernel32dll.declare("WriteFile",
                                         WinABI,
                                         BOOL,
                                         HANDLE,
-                                        ctypes.char.ptr,
+                                        WriteFileBuffer,
                                         DWORD,
                                         LPDWORD,
                                         OVERLAPPED.ptr
@@ -138,10 +142,19 @@ function initLib(libName) {
 function writePipe(pipe, data) {
     var bytesWritten = DWORD(0);
 
-    var r = libFunc.WriteFile(pipe, data, data.length, bytesWritten.address(), null);
-    if (bytesWritten.value != data.length)
-        throw("error: wrote "+bytesWritten.value+" instead of "+data.length+" bytes");
+    var pData = new WriteFileBuffer();
 
+    var numChunks = Math.floor(data.length / BufferSize);
+    for (var chunk = 0; chunk <= numChunks; chunk ++) {
+        var numBytes = chunk < numChunks ? BufferSize : data.length - chunk * BufferSize;
+        for (var i=0; i < numBytes; i++) {
+            pData[i] = data.charCodeAt(chunk * BufferSize + i) % 256;
+        }
+
+      var r = libFunc.WriteFile(pipe, pData, numBytes, bytesWritten.address(), null);
+      if (bytesWritten.value != numBytes)
+          throw("error: wrote "+bytesWritten.value+" instead of "+numBytes+" bytes");
+    }
     postMessage("wrote "+data.length+" bytes of data");
 }
 
@@ -161,7 +174,7 @@ function readPipe(pipe, charset) {
     while (true) {
         var bytesRead = DWORD(0);
         var line = new ReadFileBuffer();
-        var r = libFunc.ReadFile(pipe, line, ReadFileBufferSize, bytesRead.address(), null);
+        var r = libFunc.ReadFile(pipe, line, BufferSize, bytesRead.address(), null);
 
         if (!r) {
             // stop if we get an error (such as EOF reached)

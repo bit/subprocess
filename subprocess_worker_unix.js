@@ -45,11 +45,11 @@
 
 'use strict';
 
-const bufferSize = 1024;
-
+const BufferSize = 1024;
 
 var libc = null;
 var libcFunc = {};
+
 
 /*
     struct pollfd {
@@ -59,11 +59,17 @@ var libcFunc = {};
      };
 */
 
+const FILE = new ctypes.StructType("FILE");
+
 var pollfd = new ctypes.StructType("pollfd",
                         [   {'fd': ctypes.int},
                             {'events': ctypes.short},
                             {'revents': ctypes.short}
                         ]);
+
+var WriteBuffer = ctypes.uint8_t.array(BufferSize);
+var ReadBuffer = ctypes.char.array(BufferSize);
+
 
 const POLLIN     = 0x0001;
 const POLLOUT    = 0x0004;
@@ -89,20 +95,21 @@ function initLibc(libName) {
                                   ctypes.int);
 
     //ssize_t write(int fd, const void *buf, size_t count);
+    // NOTE: buf is declared as array of unsigned int8 instead of char to avoid
+    // implicit charset conversion
     libcFunc.write = libc.declare("write",
                                   ctypes.default_abi,
                                   ctypes.int,
                                   ctypes.int,
-                                  ctypes.char.ptr,
+                                  WriteBuffer,
                                   ctypes.int);
 
     //int read(int fd, void *buf, size_t count);
-    libcFunc.buffer = ctypes.char.array(bufferSize);
     libcFunc.read = libc.declare("read",
                                   ctypes.default_abi,
                                   ctypes.int,
                                   ctypes.int,
-                                  libcFunc.buffer,
+                                  ReadBuffer,
                                   ctypes.int);
 
     //int pipe(int pipefd[2]);
@@ -116,13 +123,27 @@ function initLibc(libName) {
 
 }
 
+function closePipe(pipe) {
+    libcFunc.close(pipe);
+}
+
 function writePipe(pipe, data) {
 
     postMessage("trying to write to "+pipe);
-    var bytesWritten = libcFunc.write(pipe, data, data.length);
-    if (bytesWritten != data.length)
-        throw("error: wrote "+bytesWritten+" instead of "+data.length+" bytes");
 
+    let numChunks = Math.floor(data.length / BufferSize);
+    let pData = new WriteBuffer();
+
+    for (var chunk = 0; chunk <= numChunks; chunk ++) {
+        let numBytes = chunk < numChunks ? BufferSize : data.length - chunk * BufferSize;
+        for (var i=0; i < numBytes; i++) {
+            pData[i] = data.charCodeAt(chunk * BufferSize + i) % 256;
+        }
+
+        let bytesWritten = libcFunc.write(pipe, pData, numBytes);
+        if (bytesWritten != numBytes)
+            throw("error: wrote "+bytesWritten+" instead of "+numBytes+" bytes");
+    }
     postMessage("wrote "+data.length+" bytes of data");
 }
 
@@ -181,8 +202,8 @@ function readPipe(pipe, charset) {
 }
 
 function readPolledFd(pipe, charset) {
-    var line = new libcFunc.buffer();
-    var r = libcFunc.read(pipe, line, bufferSize);
+    var line = new ReadBuffer();
+    var r = libcFunc.read(pipe, line, BufferSize);
 
     if (r > 0) {
         var c = readString(line, r, charset);
@@ -212,11 +233,8 @@ onmessage = function (event) {
     case "close":
         postMessage("closing stdin\n");
 
-        if (!libcFunc.close(event.data.pipe)) {
-            postMessage("ClosedOK");
-        }
-        else
-            postMessage("Could not close stdin handle");
+        closePipe(event.data.pipe);
+        postMessage("ClosedOK");
         break;
     case "stop":
         libc.close(); // do not use libc after this point

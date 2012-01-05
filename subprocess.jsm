@@ -874,7 +874,7 @@ function subprocess_win32(options) {
                 debugLog("got "+event.data.count+" bytes from "+name+"\n");
                 var data = '';
                 if (options.charset === null) {
-                    event.data.data.forEach(function(x) { data += String.fromCharCode(x) })
+                    event.data.data.forEach(function(x) { data += String.fromCharCode(x < 0 ? x + 256 : x) })
                 }
                 else
                     data = convertBytes(event.data.data, options.charset);
@@ -1184,6 +1184,7 @@ function subprocess_unix(options) {
             _envp[i] = ctypes.char.array()(environment[i]);
             // LogError(_envp);
         }
+
         rc = pipe(_in);
         if (rc < 0) {
             return -1;
@@ -1356,7 +1357,7 @@ function subprocess_unix(options) {
                 debugLog("got "+event.data.count+" bytes from "+name+"\n");
                 var data = '';
                 if (options.charset === null) {
-                    event.data.data.forEach(function(x) { data += String.fromCharCode(x) })
+                    event.data.data.forEach(function(x) { data += String.fromCharCode(x < 0 ? x + 256 : x) })
                 }
                 else
                     data = convertBytes(event.data.data, options.charset);
