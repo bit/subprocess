@@ -59,8 +59,6 @@ var libcFunc = {};
      };
 */
 
-const FILE = new ctypes.StructType("FILE");
-
 var pollfd = new ctypes.StructType("pollfd",
                         [   {'fd': ctypes.int},
                             {'events': ctypes.short},
