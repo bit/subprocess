@@ -129,11 +129,14 @@
  * The object returned by subprocess.call offers a few methods that can be
  * executed:
  *
- * wait():      waits for the subprocess to terminate. It is not required to use
- *              wait; done will be called in any case when the subprocess terminated.
+ * wait():         waits for the subprocess to terminate. It is not required to use
+ *                 wait; done will be called in any case when the subprocess terminated.
  *
- * kill():      kill the subprocess. Any open pipes will be closed and
- *              done will be called.
+ * kill(hardKill): kill the subprocess. Any open pipes will be closed and
+ *                 done will be called.
+ *                 hardKill [ignored on Windows]:
+ *                  - false: signal the process terminate (SIGTERM)
+ *                  - true:  kill the process (SIGKILL)
  *
  *
  * Other methods in subprocess
@@ -291,9 +294,36 @@ const pid_t = ctypes.uint32_t;
 const WNOHANG = 1;
 const F_SETFL = 4;
 
+const LIBNAME       = 0;
+const O_NONBLOCK    = 1;
+const RLIM_T        = 2;
+const RLIMIT_NOFILE = 3;
+
+function getPlatformValue(valueType) {
+
+    if (! gXulRuntime)
+        gXulRuntime = Cc["@mozilla.org/xre/app-info;1"].getService(Ci.nsIXULRuntime);
+
+    const platformDefaults = {
+        // Windows API:
+        'winnt':   [ 'kernel32.dll' ],
+
+        // Unix API:
+        //            library name   O_NONBLOCK RLIM_T                RLIMIT_NOFILE
+        'darwin':  [ 'libc.dylib',   0x04     , ctypes.uint64_t     , 8 ],
+        'linux':   [ 'libc.so.6',    2024     , ctypes.unsigned_long, 7 ],
+        'freebsd': [ 'libc.so.7',    0x04     , ctypes.int64_t      , 8 ],
+        'openbsd': [ 'libc.so.61.0', 0x04     , ctypes.int64_t      , 8 ],
+        'sunos':   [ 'libc.so',      0x80     , ctypes.unsigned_long, 5 ]
+    }
+
+    return platformDefaults[gXulRuntime.OS.toLowerCase()][valueType];
+}
+
 
 var gDebugFunc = null,
-    gLogFunc = null;
+    gLogFunc = null,
+    gXulRuntime = null;
 
 function LogError(s) {
     if (gLogFunc)
@@ -394,16 +424,11 @@ var subprocess = {
             options.arguments = [];
         }
 
-        var xulRuntime = Cc["@mozilla.org/xre/app-info;1"].getService(Ci.nsIXULRuntime);
-        if (xulRuntime.OS.substring(0, 3) == "WIN") {
-            options.libc = "kernel32.dll";
+        options.libc = getPlatformValue(LIBNAME);
+
+        if (gXulRuntime.OS.substring(0, 3) == "WIN") {
             return subprocess_win32(options);
         } else {
-            options.libc = {
-                'darwin': 'libc.dylib',
-                'freebsd': 'libc.so.7',
-                'openbsd': 'libc.so.61.0',
-            }[xulRuntime.OS.toLowerCase()] || 'libc.so.6';
             return subprocess_unix(options);
         }
 
@@ -415,6 +440,8 @@ var subprocess = {
         gLogFunc = func;
     }
 };
+
+
 
 function subprocess_win32(options) {
     var kernel32dll = ctypes.open(options.libc),
@@ -927,7 +954,7 @@ function subprocess_win32(options) {
 
 
         if (!options.mergeStderr) stderrWorker = createReader(child.stderr, "stderr", function (data) {
-            if(options.stdout) {
+            if(options.stderr) {
                 setTimeout(function() {
                     options.stderr(data);
                 }, 0);
@@ -1017,7 +1044,8 @@ function subprocess_win32(options) {
         closeStdinHandle();
 
     return {
-        kill: function() {
+        kill: function(hardKill) {
+            // hardKill is currently ignored on Windows
             var r = !!TerminateProcess(child.process, 255);
             cleanup(-1);
             return r;
@@ -1043,6 +1071,7 @@ function subprocess_unix(options) {
         active = true,
         done = false,
         exitCode = -1,
+        workerExitCode = 0,
         child = {},
         pid = -1,
         stdinWorker = null,
@@ -1052,17 +1081,9 @@ function subprocess_unix(options) {
         readers = options.mergeStderr ? 1 : 2,
         stdinOpenState = OPEN,
         error = '',
-        output = '',
-        xulRuntime = Cc["@mozilla.org/xre/app-info;1"].getService(Ci.nsIXULRuntime);
+        output = '';
 
     //api declarations
-    //Darwin/BSD uses 0x0004 Linux 04000 or 2048
-    const O_NONBLOCK = {
-        'darwin': 0x0004,
-        'freebsd': 0x0004,
-        'openbsd': 0x0004,
-    }[xulRuntime.OS.toLowerCase()] || 2024;
-
 
     //pid_t fork(void);
     var fork = libc.declare("fork",
@@ -1190,7 +1211,7 @@ function subprocess_unix(options) {
             return -1;
         }
         rc = pipe(_out);
-        fcntl(_out[0], F_SETFL, O_NONBLOCK);
+        fcntl(_out[0], F_SETFL, getPlatformValue(O_NONBLOCK));
         if (rc < 0) {
             close(_in[0]);
             close(_in[1]);
@@ -1198,7 +1219,7 @@ function subprocess_unix(options) {
         }
         if(!options.mergeStderr) {
             rc = pipe(_err);
-            fcntl(_err[0], F_SETFL, O_NONBLOCK);
+            fcntl(_err[0], F_SETFL, getPlatformValue(O_NONBLOCK));
             if (rc < 0) {
                 close(_in[0]);
                 close(_in[1]);
@@ -1226,6 +1247,7 @@ function subprocess_unix(options) {
                     exit(126);
                 }
             }
+            closeOtherFds(_in[0], _out[1], options.mergeStderr ? _out[1] : _err[1]);
             close(_in[1]);
             close(_out[0]);
             if(!options.mergeStderr)
@@ -1253,6 +1275,48 @@ function subprocess_unix(options) {
         return pid;
     }
 
+
+    // close any file descriptors that are not required for the process
+    function closeOtherFds(fdIn, fdOut, fdErr) {
+
+        var maxFD = 256; // arbitrary max
+
+
+        var rlim_t = getPlatformValue(RLIM_T);
+
+        const RLIMITS = new ctypes.StructType("RLIMITS", [
+            {"rlim_cur": rlim_t},
+            {"rlim_max": rlim_t}
+        ]);
+
+        try {
+            var getrlimit = libc.declare("getrlimit",
+                                  ctypes.default_abi,
+                                  ctypes.int,
+                                  ctypes.int,
+                                  RLIMITS.ptr
+            );
+
+            var rl = new RLIMITS();
+            if (getrlimit(getPlatformValue(RLIMIT_NOFILE), rl.address()) == 0) {
+                maxFD = rl.rlim_cur;
+            }
+            debugLog("getlimit: maxFD="+maxFD+"\n");
+
+        }
+        catch(ex) {
+            debugLog("getrlimit: no such function on this OS\n");
+            debugLog(ex.toString());
+        }
+
+        // close any file descriptors
+        // fd's 0-2 are already closed
+        for (var i = 3; i < maxFD; i++) {
+            if (i != fdIn && i != fdOut && i != fdErr)
+                close(i);
+        }
+    }
+
     /*
      * createStdinWriter ()
      *
@@ -1264,24 +1328,33 @@ function subprocess_unix(options) {
         debugLog("Creating new stdin worker\n");
         stdinWorker = new ChromeWorker("subprocess_worker_unix.js");
         stdinWorker.onmessage = function(event) {
-            switch(event.data) {
-            case "WriteOK":
-                pendingWriteCount--;
-                debugLog("got OK from stdinWorker - remaining count: "+pendingWriteCount+"\n");
+            switch (event.data.msg) {
+            case "info":
+                switch(event.data.data) {
+                case "WriteOK":
+                    pendingWriteCount--;
+                    debugLog("got OK from stdinWorker - remaining count: "+pendingWriteCount+"\n");
+                    break;
+                case "ClosedOK":
+                    stdinOpenState = CLOSED;
+                    debugLog("Stdin pipe closed\n");
+                    break;
+                default:
+                    debugLog("got msg from stdinWorker: "+event.data.data+"\n");
+                }
                 break;
-            case "ClosedOK":
+            case "debug":
+                debugLog("stdinWorker: "+event.data.data+"\n");
+                break;
+            case "error":
+                LogError("got error from stdinWorker: "+event.data.data+"\n");
+                pendingWriteCount = 0;
                 stdinOpenState = CLOSED;
-                debugLog("Stdin pipe closed\n");
-                break;
-            case "initFailed":
-              throw("Could not start writing to the subprocess");
-              break;
-            default:
-                debugLog("got msg from stdinWorker: "+event.data+"\n");
             }
         }
         stdinWorker.onerror = function(error) {
-            pendingWriteCount--;
+            pendingWriteCount = 0;
+            closeStdinHandle();
             LogError("got error from stdinWorker: "+error.message+"\n");
         }
         stdinWorker.postMessage({msg: "init", libc: options.libc});
@@ -1295,6 +1368,8 @@ function subprocess_unix(options) {
      * ChromeWorker object to write the data).
      */
     function writeStdin(data) {
+        if (stdinOpenState == CLOSED) return; // do not write to closed pipes
+
         ++pendingWriteCount;
         debugLog("sending "+data.length+" bytes to stdinWorker\n");
         var pipe = parseInt(child.stdin);
@@ -1366,6 +1441,7 @@ function subprocess_unix(options) {
                 break;
             case "done":
                 debugLog("Pipe "+name+" closed\n");
+                if (event.data.data != 0) workerExitCode = event.data.data;
                 --readers;
                 if (readers == 0) cleanup();
                 break;
@@ -1380,6 +1456,7 @@ function subprocess_unix(options) {
         worker.postMessage({
                 msg: 'read',
                 pipe: pipe,
+                pid: pid,
                 libc: options.libc,
                 charset: options.charset === null ? "null" : options.charset,
                 name: name
@@ -1425,7 +1502,11 @@ function subprocess_unix(options) {
 
             var result, status = ctypes.int();
             result = waitpid(child.pid, status.address(), 0);
-            exitCode = status.value;
+            if (result > 0)
+                exitCode = status.value
+            else
+                exitCode = workerExitCode;
+
             if (stdinWorker)
                 stdinWorker.postMessage({msg: 'stop'})
 
@@ -1495,8 +1576,8 @@ function subprocess_unix(options) {
             while (! done) thread.processNextEvent(true)
             return exitCode;
         },
-        kill: function() {
-            var rv = kill(pid, 9);
+        kill: function(hardKill) {
+            var rv = kill(pid, (hardKill ? 9: 15));
             cleanup(-1);
             return rv;
         }
