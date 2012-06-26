@@ -290,7 +290,7 @@ typedef struct _OVERLAPPED {
 const OVERLAPPED = new ctypes.StructType("OVERLAPPED");
 
 //UNIX definitions
-const pid_t = ctypes.uint32_t;
+const pid_t = ctypes.int32_t;
 const WNOHANG = 1;
 const F_SETFL = 4;
 
@@ -373,10 +373,20 @@ function convertBytes(bytes, charset) {
     return string;
 }
 
+
+// temporary solution for removal of nsILocalFile
+function getLocalFileApi() {
+  if ("nsILocalFile" in Ci) {
+    return Ci.nsILocalFile;
+  }
+  else
+    return Ci.nsIFile;
+}
+
 function getCommandStr(command) {
     let commandStr = null;
     if (typeof(command) == "string") {
-        let file = Cc[NS_LOCAL_FILE].createInstance(Ci.nsILocalFile);
+        let file = Cc[NS_LOCAL_FILE].createInstance(getLocalFileApi());
         file.initWithPath(command);
         if (! (file.isExecutable() && file.isFile()))
             throw("File '"+command+"' is not an executable file");
@@ -394,7 +404,7 @@ function getCommandStr(command) {
 function getWorkDir(workdir) {
     let workdirStr = null;
     if (typeof(workdir) == "string") {
-        let file = Cc[NS_LOCAL_FILE].createInstance(Ci.nsILocalFile);
+        let file = Cc[NS_LOCAL_FILE].createInstance(getLocalFileApi());
         file.initWithPath(workdir);
         if (! (file.isDirectory()))
             throw("Directory '"+workdir+"' does not exist");
@@ -1505,7 +1515,10 @@ function subprocess_unix(options) {
             if (result > 0)
                 exitCode = status.value
             else
-                exitCode = workerExitCode;
+                if (workerExitCode >= 0)
+                    exitCode = workerExitCode
+                else
+                    exitCode = status.value;
 
             if (stdinWorker)
                 stdinWorker.postMessage({msg: 'stop'})

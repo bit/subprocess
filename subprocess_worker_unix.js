@@ -78,7 +78,7 @@ const POLLNVAL   = 0x0020;         // requested events "invalid"
 
 const WNOHANG    = 0x01;
 
-const pid_t = ctypes.uint32_t;
+const pid_t = ctypes.int32_t;
 
 const INDEFINITE = -1;
 const NOWAIT     = 0;
