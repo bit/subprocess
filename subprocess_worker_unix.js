@@ -78,11 +78,13 @@ const POLLNVAL   = 0x0020;         // requested events "invalid"
 
 const WNOHANG    = 0x01;
 
+const ECHILD = 10;
+
 const pid_t = ctypes.int32_t;
 
 const INDEFINITE = -1;
 const NOWAIT     = 0;
-const WAITTIME   = 200  // wait time for poll() in ms
+const WAITTIME   = 200;  // wait time for poll() in ms
 
 function initLibc(libName) {
     postMessage({msg: "debug", data: "initialising library with "+ libName});
@@ -165,18 +167,18 @@ function writePipe(pipe, data) {
 
 
 function readString(data, length, charset) {
-    var string = '', bytes = [];
-    for(var i = 0;i < length; i++) {
+    var r = '';
+    for(var i = 0; i < length; i++) {
         if(data[i] == 0 && charset != "null") // stop on NULL character for non-binary data
            break;
 
-        bytes.push(data[i]);
+        r += String.fromCharCode(data[i]);
     }
 
-    return bytes;
+    return r;
 }
 
-function readPipe(pipe, charset, pid) {
+function readPipe(pipe, charset, pid, bufferedOutput) {
     var p = new libcFunc.pollFds;
     p[0].fd = pipe;
     p[0].events = POLLIN | POLLERR | POLLHUP;
@@ -187,6 +189,8 @@ function readPipe(pipe, charset, pid) {
     var result, status = ctypes.int();
     result = 0;
 
+    var dataStr = "";
+    var dataObj = {};
 
     const i=0;
     while (true) {
@@ -197,12 +201,28 @@ function readPipe(pipe, charset, pid) {
                 exitCode = parseInt(status.value);
                 postMessage({msg: "debug", data: "waitpid signaled subprocess stop, exitcode="+status.value });
             }
+            else if (result < 0) {
+              postMessage({msg: "debug", data: "waitpid returned with errno="+ctypes.errno });
+              if (ctypes.errno == ECHILD) {
+                pollTimeout = NOWAIT;
+              }
+            }
         }
+        p[i].revents = 0;
         var r = libcFunc.poll(p, 1, pollTimeout);
+        if (pollTimeout == NOWAIT) {
+          readCount = 0;
+        }
         if (r > 0) {
             if (p[i].revents & POLLIN) {
-                postMessage({msg: "debug", data: "reading next chunk"});
-                readCount = readPolledFd(p[i].fd, charset);
+                // postMessage({msg: "debug", data: "reading next chunk"});
+
+                readCount = readPolledFd(p[i].fd, charset, dataObj);
+                if (! bufferedOutput)
+                  postMessage({msg: "data", data: dataObj.value, count: dataObj.value.length});
+                else
+                  dataStr += dataObj.value;
+
                 if (readCount == 0) break;
             }
 
@@ -220,13 +240,22 @@ function readPipe(pipe, charset, pid) {
             }
         }
         else
-            if (pollTimeout == 0 || r < 0) break;
+            if (pollTimeout == NOWAIT || r < 0) break;
     }
 
     // continue reading until the buffer is empty
     while (readCount > 0) {
-      readCount = readPolledFd(pipe, charset);
+      readCount = readPolledFd(pipe, charset, dataObj);
+      if (! bufferedOutput)
+        postMessage({msg: "data", data: dataObj.value, count: dataObj.value.length});
+      else
+        dataStr += dataObj.value;
+
+      let r = libcFunc.poll(p, 1, NOWAIT);
     }
+
+    if (bufferedOutput)
+      postMessage({msg: "data", data: dataStr, count: dataStr.length});
 
     libcFunc.close(pipe);
     postMessage({msg: "done", data: exitCode });
@@ -234,14 +263,17 @@ function readPipe(pipe, charset, pid) {
     close();
 }
 
-function readPolledFd(pipe, charset) {
+function readPolledFd(pipe, charset, dataObj) {
     var line = new ReadBuffer();
     var r = libcFunc.read(pipe, line, BufferSize);
 
     if (r > 0) {
         var c = readString(line, r, charset);
-        postMessage({msg: "data", data: c, count: c.length});
+        dataObj.value = c;
     }
+    else
+       dataObj.value = "";
+
     return r;
 }
 
@@ -252,7 +284,7 @@ onmessage = function (event) {
         break;
     case "read":
         initLibc(event.data.libc);
-        readPipe(event.data.pipe, event.data.charset, event.data.pid);
+        readPipe(event.data.pipe, event.data.charset, event.data.pid, event.data.bufferedOutput);
         break;
     case "write":
         // data contents:

@@ -138,6 +138,9 @@ function initLib(libName) {
     );
 }
 
+// Windows error codes
+const ERROR_HANDLE_EOF = 38;
+const ERROR_BROKEN_PIPE = 109;
 
 function writePipe(pipe, data) {
     var bytesWritten = DWORD(0);
@@ -159,18 +162,20 @@ function writePipe(pipe, data) {
 }
 
 function readString(data, length, charset) {
-    var string = '', bytes = [];
-    for(var i = 0;i < length; i++) {
+    var r = '';
+    for(var i = 0; i < length; i++) {
         if(data[i] == 0 && charset != "null") // stop on NULL character for non-binary data
            break;
 
-        bytes.push(data[i]);
+        r += String.fromCharCode(data[i]);
     }
 
-    return bytes;
+    return r;
 }
 
-function readPipe(pipe, charset) {
+
+function readPipe(pipe, charset, bufferedOutput) {
+    var dataStr = "";
     while (true) {
         var bytesRead = DWORD(0);
         var line = new ReadFileBuffer();
@@ -178,18 +183,33 @@ function readPipe(pipe, charset) {
 
         if (!r) {
             // stop if we get an error (such as EOF reached)
-            postMessage({msg: "info", data: "ReadFile failed"});
+            let lastErr = ctypes.winLastError;
+            switch (lastErr) {
+                case ERROR_HANDLE_EOF:
+                case ERROR_BROKEN_PIPE:
+                    postMessage({msg: "info", data: "EOF reached"});
+                    break;
+                default:
+                    postMessage({msg: "error", data: "Windows error " + lastErr});
+            }
             break;
         }
 
         if (bytesRead.value > 0) {
             var c = readString(line, bytesRead.value, charset);
-            postMessage({msg: "data", data: c, count: c.length});
+            if (!bufferedOutput)
+              postMessage({msg: "data", data: c, count: c.length});
+            else
+              dataStr += c;
         }
         else {
             break;
         }
     }
+
+    if (bufferedOutput)
+      postMessage({msg: "data", data: dataStr, count: dataStr.length});
+
     libFunc.CloseHandle(pipe);
     postMessage({msg: "done"});
     kernel32dll.close();
@@ -214,7 +234,7 @@ onmessage = function (event) {
     case "read":
         initLib(event.data.libc);
         pipePtr = HANDLE.ptr(event.data.pipe);
-        readPipe(pipePtr.contents, event.data.charset);
+        readPipe(pipePtr.contents, event.data.charset, event.data.bufferedOutput);
         break;
     case "close":
         pipePtr = HANDLE.ptr(event.data.pipe);
