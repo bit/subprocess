@@ -161,7 +161,7 @@
 
 Components.utils.import("resource://gre/modules/ctypes.jsm");
 
-let EXPORTED_SYMBOLS = [ "subprocess" ];
+this.EXPORTED_SYMBOLS = ['subprocess'];
 
 const Cc = Components.classes;
 const Ci = Components.interfaces;
@@ -321,7 +321,8 @@ function getPlatformValue(valueType) {
         'linux':   [ 'libc.so.6',    2024     , ctypes.unsigned_long, 7 ],
         'freebsd': [ 'libc.so.7',    0x04     , ctypes.int64_t      , 8 ],
         'openbsd': [ 'libc.so.61.0', 0x04     , ctypes.int64_t      , 8 ],
-        'sunos':   [ 'libc.so',      0x80     , ctypes.unsigned_long, 5 ]
+        'sunos':   [ 'libc.so',      0x80     , ctypes.unsigned_long, 5 ],
+        'android': [ 'libc.so',      2024     , ctypes.unsigned_long, 7 ]
     };
 
     return platformDefaults[gXulRuntime.OS.toLowerCase()][valueType];
@@ -401,7 +402,7 @@ function getWorkDir(workdir) {
 }
 
 
-var subprocess = {
+var subprocess = this.subprocess = {
     call: function(options) {
         options.mergeStderr = options.mergeStderr || false;
         options.bufferedOutput = options.bufferedOutput || false;
@@ -419,7 +420,10 @@ var subprocess = {
 
         options.libc = getPlatformValue(LIBNAME);
 
-        if (gXulRuntime.OS.substring(0, 3) == "WIN") {
+        if (gXulRuntime.OS.toLowerCase() == "android") {
+            return subprocess_android(options);
+        }
+        else if (gXulRuntime.OS.substring(0, 3) == "WIN") {
             return subprocess_win32(options);
         } else {
             return subprocess_unix(options);
@@ -899,7 +903,7 @@ function subprocess_win32(options) {
                 break;
             case "error":
                 exitCode = -2;
-				LogError("Got msg from "+name+": "+event.data.data+"\n");
+                LogError("Got msg from "+name+": "+event.data.data+"\n");
                 break;
             default:
                 debugLog("Got msg from "+name+": "+event.data.data+"\n");
@@ -1053,6 +1057,101 @@ function subprocess_win32(options) {
     };
 }
 
+/**
+ * Limited varation of the Linux version that works on Android / B2G.
+ * It does not do stdin, stderr or workdir.
+ * But it can execute stuff so there's that.
+ */
+function subprocess_android(options) {
+    function createAndroidReader(pipe, dataFunc, doneFunc) {
+        var name = 'stdout';
+        var worker = new ChromeWorker("subprocess_worker_unix.js");
+        worker.onmessage = function(event) {
+            switch(event.data.msg) {
+            case "data":
+                debugLog("got "+event.data.count+" bytes from "+name+"\n");
+                var data = '';
+                if (options.charset === null) {
+                    data = event.data.data;
+                }
+                else
+                    data = convertBytes(event.data.data, options.charset);
+
+                dataFunc(data);
+                break;
+            case "done":
+                debugLog("Pipe "+name+" closed\n");
+                doneFunc(event.data.data);
+                break;
+            case "error":
+                LogError("Got error from "+name+": "+event.data.data);
+                exitCode = -2;
+                break;
+            default:
+                debugLog("Got msg from "+name+": "+event.data.data+"\n");
+            }
+        };
+        worker.onerror = function(error) {
+            LogError("Got error from "+name+": "+error.message);
+            exitCode = -2;
+        };
+
+        worker.postMessage({
+                msg: 'read',
+                pipe: pipe,
+                pid: -1,
+                libc: options.libc,
+                charset: options.charset === null ? "null" : options.charset,
+                bufferedOutput: options.bufferedOutput,
+                name: name
+            });
+
+        return worker;
+    }
+
+    var libc = ctypes.open(options.libc);
+
+    const FILE = new ctypes.StructType("FILE").ptr;
+    var libc = ctypes.open(options.libc);
+
+    // FILE *popen(const char *command, const char *type);
+    var popen = libc.declare("popen",
+                              ctypes.default_abi,
+                              FILE,
+                              ctypes.char.ptr,
+                              ctypes.char.ptr);
+
+    // int *pclose(FILE *stream);
+    var pclose = libc.declare("pclose",
+                               ctypes.default_abi,
+                               ctypes.int,
+                               FILE);
+
+    // int fileno(FILE *stream).
+    var fileno = libc.declare("fileno",
+                              ctypes.default_abi,
+                              ctypes.int,
+                              FILE);
+
+    var fileptr = popen([ options.command ].concat(options.arguments || []).join(' '), 'r');
+    var fd = fileno(fileptr);
+
+    let outdata = '';
+    createAndroidReader(fd, function(data) {
+        outdata += data;
+        if (options.stdout) {
+            options.stdout(data);
+        }
+    }, function(exitCode) {
+        pclose(fileptr);
+
+        options.done({
+          exitCode: exitCode,
+          stdout: outdata,
+          stderr: ''
+        });
+    });
+}
 
 function subprocess_unix(options) {
     // stdin pipe states
